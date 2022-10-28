@@ -1,3 +1,4 @@
 # UnityProject-1
-Server - Online Server\n
+Server - Online Server
+
 Client - Game Client
