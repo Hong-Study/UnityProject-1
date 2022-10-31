@@ -10,5 +10,8 @@ public class Client : MonoBehaviour
     {
         clientInterface = new ClientInterface();
         clientInterface.Start();
+
+        if (clientInterface.isRead())
+            clientInterface.Read();
     }
 }
