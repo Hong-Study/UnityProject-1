@@ -61,16 +61,19 @@ void WorkerThreadMain(HANDLE iocpHandle)
 		}
 
 		ASSERT_CRASH(overlappedEx->type == IO_TYPE::READ);
-
+		
 		cout << "Recv Data IOCP = " << bytesTransferred << endl;
-
+		cout << session->recvBuffer << endl;
 		WSABUF wsaBuf;
 		wsaBuf.buf = session->recvBuffer;
 		wsaBuf.len = BUFSIZE;
 
-		DWORD recvLen = 0;
+		DWORD sendLen = 0;		
+		::WSASend(session->socket, &wsaBuf, 1, &sendLen, 0, &overlappedEx->overlapped, NULL);
+
+		/*DWORD recvLen = 0;
 		DWORD flags = 0;
-		::WSARecv(session->socket, &wsaBuf, 1, &recvLen, &flags, &overlappedEx->overlapped, NULL);
+		::WSARecv(session->socket, &wsaBuf, 1, &recvLen, &flags, &overlappedEx->overlapped, NULL);*/
 	}
 }
 
@@ -98,20 +101,6 @@ int main()
 
 	cout << "Accept" << endl;
 	
-	// Overlapped 모델 (Completion Routine 콜백 기반)
-	// - 비동기 입출력 함수 완료되면, 쓰레드마다 있는 APC 큐에 일감이 쌓임
-	// - Alertable Wait 상태로 들어가서 APC 큐 비우기 (콜백 함수)
-	// 단점) APC큐 쓰레드마다 있다! Alertable Wait 자체도 조금 부담!
-	// 단점) 이벤트 방식 소켓:이벤트 1:1 대응
-
-	// IOCP (Completion Port) 모델
-	// - APC -> Completion Port (쓰레드마다 있는건 아니고 1개. 중앙에서 관리하는 APC 큐?)
-	// - Alertable Wait -> CP 결과 처리를 GetQueuedCompletionStatus
-	// 쓰레드랑 궁합이 굉장히 좋다!
-
-	// CreateIoCompletionPort
-	// GetQueuedCompletionStatus
-
 	vector<Session*> sessionManager;
 
 	// CP 생성

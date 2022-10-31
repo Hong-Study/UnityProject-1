@@ -1,28 +1,48 @@
-﻿using System;
-using System.Collections;
+﻿using System.Collections;
 using System.Collections.Generic;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading;
 using UnityEngine;
+using UnityEngine.UI;
+using System.Net.Sockets;
+using System.IO;
+using System;
 
 public class ClientInterface
 {
 	private TcpClient socketConnection;
 	private static int displayId = 0;
 	private PacketManager packetManager = new PacketManager(displayId);
+	StreamWriter writer;
+	StreamReader reader;
+	NetworkStream stream;
 
 	public void Start()
     {
 		ConnectToTcpServer();
 	}
 
+	public bool isRead()
+    {
+		return stream.DataAvailable;
+    }
+	public void Read()
+    {
+		string data = reader.ReadLine();
+		Debug.Log(data);
+    }
+
 	private void ConnectToTcpServer()
 	{
 		try
 		{
-			socketConnection = new TcpClient("127.0.0.1", 5000);
+			socketConnection = new TcpClient("203.241.228.47", 5000);
+			stream = socketConnection.GetStream();
+			writer = new StreamWriter(stream);
+			reader = new StreamReader(stream);
+
 			Debug.Log("Success Login");
+
+			SendMessage("HelloWorld");
+			
 		}
 		catch (Exception e)
 		{
@@ -30,46 +50,25 @@ public class ClientInterface
 		}
 	}
 
-	//public void SendTouch(int x, int y)
- //   {
-	//	SendMessage(packetManager.GetTouchPacket(x, y));
- //   }
-
-	//public void SendDirection(int direction)
- //   {
-	//	SendMessage(packetManager.GetDirectionPacket(direction));
- //   }
-
-	//public void SendGaze(int x, int y)
- //   {
-	//	SendMessage(packetManager.GetGazePacket(x, y));
- //   }
-
-	//public void SendVoice(string message)
-	//{
-	//	SendMessage(packetManager.GetVoicePacket(message));
-	//}
-
-	//public void SendHandSkeleton(int x, int y)
-	//{
-	//	SendMessage(packetManager.GetHandSkeletonPacket(x, y));
-	//}
-
 	/// Send message to server using socket connection. 	
-	private void SendMessage(Byte[] buffer)
+	private void SendMessage(string data)
 	{
 		if (socketConnection == null)
 		{
 			return;
 		}
 		try
-		{
-			// Get a stream object for writing. 			
-			NetworkStream stream = socketConnection.GetStream();
+		{	
 			if (stream.CanWrite)
 			{
 				// Write byte array to socketConnection stream.                 
-				stream.Write(buffer, 0, buffer.Length);
+				writer.WriteLine(data);
+				writer.Flush();
+
+				Debug.Log("Success Send");
+
+				data = reader.ReadLine();
+				Debug.Log(data);
 			}
 		}
 		catch (SocketException socketException)
