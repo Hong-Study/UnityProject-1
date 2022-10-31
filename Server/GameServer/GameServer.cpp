@@ -12,6 +12,8 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
+#include "Memory.h"
+
 void HandleError(const char* cause)
 {
 	int32 errCode = ::WSAGetLastError();
@@ -24,9 +26,53 @@ struct Session
 {
 	SOCKET socket = INVALID_SOCKET;
 	char recvBuffer[BUFSIZE] = {};
-	int32 recvBytes = 0;
-	int32 sendBytes = 0;
+	int32 recvBytes = 0;	
 };
+
+enum IO_TYPE
+{
+	READ,
+	WRITE,
+	ACCEPT,
+	CONNECT,
+};
+
+struct OverlappedEx
+{
+	WSAOVERLAPPED overlapped = {};
+	int32 type = 0; // read, write, accept, connect ...
+};
+
+void WorkerThreadMain(HANDLE iocpHandle)
+{
+	while (true)
+	{
+		DWORD bytesTransferred = 0;
+		Session* session = nullptr;
+		OverlappedEx* overlappedEx = nullptr;
+
+		BOOL ret = ::GetQueuedCompletionStatus(iocpHandle, &bytesTransferred,
+			(ULONG_PTR*)&session, (LPOVERLAPPED*)&overlappedEx, INFINITE);
+
+		if (ret == FALSE || bytesTransferred == 0)
+		{
+			// TODO : 연결 끊김
+			continue;
+		}
+
+		ASSERT_CRASH(overlappedEx->type == IO_TYPE::READ);
+
+		cout << "Recv Data IOCP = " << bytesTransferred << endl;
+
+		WSABUF wsaBuf;
+		wsaBuf.buf = session->recvBuffer;
+		wsaBuf.len = BUFSIZE;
+
+		DWORD recvLen = 0;
+		DWORD flags = 0;
+		::WSARecv(session->socket, &wsaBuf, 1, &recvLen, &flags, &overlappedEx->overlapped, NULL);
+	}
+}
 
 int main()
 {
@@ -38,15 +84,11 @@ int main()
 	if (listenSocket == INVALID_SOCKET)
 		return 0;
 
-	u_long on = 1;
-	if (::ioctlsocket(listenSocket, FIONBIO, &on) == INVALID_SOCKET)
-		return 0;
-
 	SOCKADDR_IN serverAddr;
 	::memset(&serverAddr, 0, sizeof(serverAddr));
 	serverAddr.sin_family = AF_INET;
 	serverAddr.sin_addr.s_addr = ::htonl(INADDR_ANY);
-	serverAddr.sin_port = ::htons(7777);
+	serverAddr.sin_port = ::htons(5000);
 
 	if (::bind(listenSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
 		return 0;
@@ -55,149 +97,71 @@ int main()
 		return 0;
 
 	cout << "Accept" << endl;
+	
+	// Overlapped 모델 (Completion Routine 콜백 기반)
+	// - 비동기 입출력 함수 완료되면, 쓰레드마다 있는 APC 큐에 일감이 쌓임
+	// - Alertable Wait 상태로 들어가서 APC 큐 비우기 (콜백 함수)
+	// 단점) APC큐 쓰레드마다 있다! Alertable Wait 자체도 조금 부담!
+	// 단점) 이벤트 방식 소켓:이벤트 1:1 대응
 
-	// WSAEventSelect = (WSAEventSelect 함수가 핵심이 되는)
-	// 소켓과 관련된 네트워크 이벤트를 [이벤트 객체]를 통해 감지
+	// IOCP (Completion Port) 모델
+	// - APC -> Completion Port (쓰레드마다 있는건 아니고 1개. 중앙에서 관리하는 APC 큐?)
+	// - Alertable Wait -> CP 결과 처리를 GetQueuedCompletionStatus
+	// 쓰레드랑 궁합이 굉장히 좋다!
 
-	// 이벤트 객체 관련 함수들
-	// 생성 : WSACreateEvent (수동 리셋 Manual-Reset + Non-Signaled 상태 시작)
-	// 삭제 : WSACloseEvent
-	// 신호 상태 감지 : WSAWaitForMultipleEvents
-	// 구체적인 네트워크 이벤트 알아내기 : WSAEnumNetworkEvents
+	// CreateIoCompletionPort
+	// GetQueuedCompletionStatus
 
-	// 소켓 <-> 이벤트 객체 연동
-	// WSAEventSelect(socket, event, networkEvents);
-	// - 관심있는 네트워크 이벤트
-	// FD_ACCEPT : 접속한 클라가 있음 accept
-	// FD_READ : 데이터 수신 가능 recv, recvfrom
-	// FD_WRITE : 데이터 송신 가능 send, sendto
-	// FD_CLOSE : 상대가 접속 종료
-	// FD_CONNECT : 통신을 위한 연결 절차 완료
-	// FD_OOB
+	vector<Session*> sessionManager;
 
-	// 주의 사항
-	// WSAEventSelect 함수를 호출하면, 해당 소켓은 자동으로 넌블로킹 모드 전환
-	// accept() 함수가 리턴하는 소켓은 listenSocket과 동일한 속성을 갖는다
-	// - 따라서 clientSocket은 FD_READ, FD_WRITE 등을 다시 등록 필요
-	// - 드물게 WSAEWOULDBLOCK 오류가 뜰 수 있으니 예외 처리 필요
-	// 중요)
-	// - 이벤트 발생 시, 적절한 소켓 함수 호출해야 함
-	// - 아니면 다음 번에는 동일 네트워크 이벤트가 발생 X
-	// ex) FD_READ 이벤트 떴으면 recv() 호출해야 하고, 안하면 FD_READ 두 번 다시 X
+	// CP 생성
+	HANDLE iocpHandle = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
 
-	// 1) count, event
-	// 2) waitAll : 모두 기다림? 하나만 완료 되어도 OK?
-	// 3) timeout : 타임아웃
-	// 4) 지금은 false
-	// return : 완료된 첫번째 인덱스
-	// WSAWaitForMultipleEvents
+	// WorkerThreads
+	for (int32 i = 0; i < 5; i++)
+		GThreadManager->Launch([=]() { WorkerThreadMain(iocpHandle); });
 
-	// 1) socket
-	// 2) eventObject : socket 과 연동된 이벤트 객체 핸들을 넘겨주면, 이벤트 객체를 non-signaled
-	// 3) networkEvent : 네트워크 이벤트 / 오류 정보가 저장
-	// WSAEnumNetworkEvents
-
-	vector<WSAEVENT> wsaEvents;
-	vector<Session> sessions;
-	sessions.reserve(100);
-
-	WSAEVENT listenEvent = ::WSACreateEvent();
-	wsaEvents.push_back(listenEvent);
-	sessions.push_back(Session{ listenSocket });
-	if (::WSAEventSelect(listenSocket, listenEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR)
-		return 0;
-
+	// Main Thread = Accept 담당
 	while (true)
 	{
-		int32 index = ::WSAWaitForMultipleEvents(wsaEvents.size(), &wsaEvents[0], FALSE, WSA_INFINITE, FALSE);
-		if (index == WSA_WAIT_FAILED)
-			continue;
+		SOCKADDR_IN clientAddr;
+		int32 addrLen = sizeof(clientAddr);
 
-		index -= WSA_WAIT_EVENT_0;
+		SOCKET clientSocket = ::accept(listenSocket, (SOCKADDR*)&clientAddr, &addrLen);
+		if (clientSocket == INVALID_SOCKET)
+			return 0;
 
-		//::WSAResetEvent(wsaEvents[index]);
+		Session* session = xnew<Session>();
+		session->socket = clientSocket;
+		sessionManager.push_back(session);
 
-		WSANETWORKEVENTS networkEvents;
-		if (::WSAEnumNetworkEvents(sessions[index].socket, wsaEvents[index], &networkEvents) == SOCKET_ERROR)
-			continue;
+		cout << "Client Connected !" << endl;
 
-		// Listener 소켓 체크
-		if (networkEvents.lNetworkEvents & FD_ACCEPT)
-		{
-			// Error-Check
-			if (networkEvents.iErrorCode[FD_ACCEPT_BIT] != 0)
-				continue;
+		// 소켓을 CP에 등록
+		::CreateIoCompletionPort((HANDLE)clientSocket, iocpHandle, /*Key*/(ULONG_PTR)session, 0);
 
-			SOCKADDR_IN clientAddr;
-			int32 addrLen = sizeof(clientAddr);
+		WSABUF wsaBuf;
+		wsaBuf.buf = session->recvBuffer;
+		wsaBuf.len = BUFSIZE;
 
-			SOCKET clientSocket = ::accept(listenSocket, (SOCKADDR*)&clientAddr, &addrLen);
-			if (clientSocket != INVALID_SOCKET)
-			{
-				cout << "Client Connected" << endl;
+		OverlappedEx* overlappedEx = new OverlappedEx();
+		overlappedEx->type = IO_TYPE::READ;
 
-				WSAEVENT clientEvent = ::WSACreateEvent();
-				wsaEvents.push_back(clientEvent);
-				sessions.push_back(Session{ clientSocket });
-				if (::WSAEventSelect(clientSocket, clientEvent, FD_READ | FD_WRITE | FD_CLOSE) == SOCKET_ERROR)
-					return 0;
-			}
-		}
+		// ADD_REF
+		DWORD recvLen = 0;
+		DWORD flags = 0;
+		::WSARecv(clientSocket, &wsaBuf, 1, &recvLen, &flags, &overlappedEx->overlapped, NULL);
 
-		// Client Session 소켓 체크
-		if (networkEvents.lNetworkEvents & FD_READ || networkEvents.lNetworkEvents & FD_WRITE)
-		{
-			// Error-Check
-			if ((networkEvents.lNetworkEvents & FD_READ) && (networkEvents.iErrorCode[FD_READ_BIT] != 0))
-				continue;
-			// Error-Check
-			if ((networkEvents.lNetworkEvents & FD_WRITE) && (networkEvents.iErrorCode[FD_WRITE_BIT] != 0))
-				continue;
-
-			Session& s = sessions[index];
-
-			// Read
-			if (s.recvBytes == 0)
-			{
-				int32 recvLen = ::recv(s.socket, s.recvBuffer, BUFSIZE, 0);
-				if (recvLen == SOCKET_ERROR && ::WSAGetLastError() != WSAEWOULDBLOCK)
-				{
-					// TODO : Remove Session
-					continue;
-				}
-
-				s.recvBytes = recvLen;
-				cout << "Recv Data = " << recvLen << endl;
-			}
-
-			// Write
-			if (s.recvBytes > s.sendBytes)
-			{
-				int32 sendLen = ::send(s.socket, &s.recvBuffer[s.sendBytes], s.recvBytes - s.sendBytes, 0);
-				if (sendLen == SOCKET_ERROR && ::WSAGetLastError() != WSAEWOULDBLOCK)
-				{
-					// TODO : Remove Session
-					continue;
-				}
-
-				s.sendBytes += sendLen;
-				if (s.recvBytes == s.sendBytes)
-				{
-					s.recvBytes = 0;
-					s.sendBytes = 0;
-				}
-
-				cout << "Send Data = " << sendLen << endl;
-			}
-		}
-
-		// FD_CLOSE 처리
-		if (networkEvents.lNetworkEvents & FD_CLOSE)
-		{
-			// TODO : Remove Socket
-		}
+		// 유저가 게임 접속 종료!
+		//Session* s = sessionManager.back();
+		//sessionManager.pop_back();
+		//xdelete(s);
+		
+		//::closesocket(session.socket);
+		//::WSACloseEvent(wsaEvent);
 	}
 
+	GThreadManager->Join();
 	
 	// 윈속 종료
 	::WSACleanup();
