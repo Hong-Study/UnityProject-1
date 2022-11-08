@@ -9,9 +9,12 @@ public class Client : MonoBehaviour
     void Start()
     {
         clientInterface = new ClientInterface();
-        clientInterface.Start();
+        for (int i = 0; i < 10; i++)
+        {
+            clientInterface.Start();
+        }
 
-        if (clientInterface.isRead())
-            clientInterface.Read();
+        //if (clientInterface.isRead())
+        //    clientInterface.Read();
     }
 }

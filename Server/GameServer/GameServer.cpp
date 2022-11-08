@@ -6,13 +6,21 @@
 #include <windows.h>
 #include <future>
 #include "ThreadManager.h"
-
 #include <winsock2.h>
 #include <mswsock.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
-
 #include "Memory.h"
+
+#pragma pack(push)
+#pragma pack(1)
+typedef struct socket_data {
+	DWORD msg;
+	WORD size;
+	WORD type;
+	char data[100];
+}SOCKET_DATA, *LP_SOCKET_DATA;
+#pragma pack(pop)
 
 void HandleError(const char* cause)
 {
@@ -25,7 +33,7 @@ const int32 BUFSIZE = 1000;
 struct Session
 {
 	SOCKET socket = INVALID_SOCKET;
-	char recvBuffer[BUFSIZE] = {};
+	LP_SOCKET_DATA recvBuffer;
 	int32 recvBytes = 0;	
 };
 
@@ -63,17 +71,20 @@ void WorkerThreadMain(HANDLE iocpHandle)
 		ASSERT_CRASH(overlappedEx->type == IO_TYPE::READ);
 		
 		cout << "Recv Data IOCP = " << bytesTransferred << endl;
-		cout << session->recvBuffer << endl;
+		cout << "msg : " << session->recvBuffer->msg << endl;
+		cout << "size : " << session->recvBuffer->size << endl;
+		cout << "type : " << session->recvBuffer->type << endl;
+		cout << "data : " << session->recvBuffer->data << endl;
+		cout << endl;
+
+		ZeroMemory(session->recvBuffer->data, sizeof(char)*100);
 		WSABUF wsaBuf;
-		wsaBuf.buf = session->recvBuffer;
-		wsaBuf.len = BUFSIZE;
+		wsaBuf.buf = (char*)session->recvBuffer;
+		wsaBuf.len = sizeof(SOCKET_DATA);
 
-		DWORD sendLen = 0;		
-		::WSASend(session->socket, &wsaBuf, 1, &sendLen, 0, &overlappedEx->overlapped, NULL);
-
-		/*DWORD recvLen = 0;
+		DWORD recvLen = 0;
 		DWORD flags = 0;
-		::WSARecv(session->socket, &wsaBuf, 1, &recvLen, &flags, &overlappedEx->overlapped, NULL);*/
+		::WSARecv(session->socket, &wsaBuf, 1, &recvLen, &flags, &overlappedEx->overlapped, NULL);
 	}
 }
 
@@ -122,6 +133,9 @@ int main()
 
 		Session* session = xnew<Session>();
 		session->socket = clientSocket;
+		session->recvBuffer = new socket_data;
+		ZeroMemory(session->recvBuffer, sizeof(SOCKET_DATA));
+
 		sessionManager.push_back(session);
 
 		cout << "Client Connected !" << endl;
@@ -130,8 +144,10 @@ int main()
 		::CreateIoCompletionPort((HANDLE)clientSocket, iocpHandle, /*Key*/(ULONG_PTR)session, 0);
 
 		WSABUF wsaBuf;
-		wsaBuf.buf = session->recvBuffer;
-		wsaBuf.len = BUFSIZE;
+		wsaBuf.buf = (char*)session->recvBuffer;
+		wsaBuf.len = sizeof(SOCKET_DATA);
+
+		cout << "wsaBuf.len : " << wsaBuf.len << endl;
 
 		OverlappedEx* overlappedEx = new OverlappedEx();
 		overlappedEx->type = IO_TYPE::READ;
